@@ -127,9 +127,8 @@ class RetinalLearner(Learner):
         log.debug("Initializing actor-critic model on device %s", self.device)
 
         # trainable torch module
-        self.actor_critic = create_actor_critic(
-            self.cfg, self.env_info.obs_space, self.env_info.action_space
-        )  # TODO: Check actor_critic usage
+        self.actor_critic = create_actor_critic(self.cfg, self.env_info.obs_space, self.env_info.action_space)
+        # TODO: Check actor_critic usage
         log.debug("Created Actor Critic model with architecture:")
         log.debug(self.actor_critic)
         self.actor_critic.model_to_device(self.device)
@@ -174,35 +173,6 @@ class RetinalLearner(Learner):
 
         return model_initialization_data(self.cfg, self.policy_id, self.actor_critic, self.train_step, self.device)
 
-    @staticmethod
-    def checkpoint_dir(cfg, policy_id):
-        checkpoint_dir = join(experiment_dir(cfg=cfg), f"checkpoint_p{policy_id}")
-        return ensure_dir_exists(checkpoint_dir)
-
-    @staticmethod
-    def get_checkpoints(checkpoints_dir, pattern="checkpoint_*"):
-        checkpoints = glob.glob(join(checkpoints_dir, pattern))
-        return sorted(checkpoints)
-
-    @staticmethod
-    def load_checkpoint(checkpoints, device):
-        if len(checkpoints) <= 0:
-            log.warning("No checkpoints found")
-            return None
-        else:
-            latest_checkpoint = checkpoints[-1]
-
-            # extra safety mechanism to recover from spurious filesystem errors
-            num_attempts = 3
-            for attempt in range(num_attempts):
-                # noinspection PyBroadException
-                try:
-                    log.warning("Loading state from checkpoint %s...", latest_checkpoint)
-                    checkpoint_dict = torch.load(latest_checkpoint, map_location=device)
-                    return checkpoint_dict
-                except Exception:
-                    log.exception(f"Could not load from checkpoint, attempt {attempt}")
-
     def _load_state(self, checkpoint_dict, load_progress=True):
         if load_progress:
             self.train_step = checkpoint_dict["train_step"]
@@ -214,29 +184,6 @@ class RetinalLearner(Learner):
 
         log.info(f"Loaded experiment state at {self.train_step=}, {self.env_steps=}")
 
-    def load_from_checkpoint(self, policy_id: PolicyID, load_progress: bool = True) -> None:
-        name_prefix = dict(latest="checkpoint", best="best")[self.cfg.load_checkpoint_kind]
-        checkpoints = self.get_checkpoints(self.checkpoint_dir(self.cfg, policy_id), pattern=f"{name_prefix}_*")
-        checkpoint_dict = self.load_checkpoint(checkpoints, self.device)
-        if checkpoint_dict is None:
-            log.debug("Did not load from checkpoint, starting from scratch!")
-        else:
-            log.debug("Loading model from checkpoint")
-
-            # if we're replacing our policy with another policy (under PBT), let's not reload the env_steps
-            self._load_state(checkpoint_dict, load_progress=load_progress)
-
-    def _should_save_summaries(self):
-        summaries_every_seconds = self.summary_rate_decay_seconds.at(self.train_step)
-        if time.time() - self.last_summary_time < summaries_every_seconds:
-            return False
-
-        return True
-
-    def _after_optimizer_step(self):
-        """A hook to be called after each optimizer step."""
-        self.train_step += 1
-
     def _get_checkpoint_dict(self):
         checkpoint = {
             "train_step": self.train_step,
@@ -247,113 +194,6 @@ class RetinalLearner(Learner):
             "curr_lr": self.curr_lr,
         }
         return checkpoint
-
-    def _save_impl(self, name_prefix, name_suffix, keep_checkpoints, verbose=True) -> bool:
-        if not self.is_initialized:
-            return False
-
-        checkpoint = self._get_checkpoint_dict()
-        assert checkpoint is not None
-
-        checkpoint_dir = self.checkpoint_dir(self.cfg, self.policy_id)
-        tmp_filepath = join(checkpoint_dir, f"{name_prefix}_temp")
-        checkpoint_name = f"{name_prefix}_{self.train_step:09d}_{self.env_steps}{name_suffix}.pth"
-        filepath = join(checkpoint_dir, checkpoint_name)
-        if verbose:
-            log.info("Saving %s...", filepath)
-
-        # This should protect us from a rare case where something goes wrong mid-save and we end up with a corrupted
-        # checkpoint file. It better be a corrupted temp file.
-        torch.save(checkpoint, tmp_filepath)
-        os.rename(tmp_filepath, filepath)
-
-        while len(checkpoints := self.get_checkpoints(checkpoint_dir, f"{name_prefix}_*")) > keep_checkpoints:
-            oldest_checkpoint = checkpoints[0]
-            if os.path.isfile(oldest_checkpoint):
-                if verbose:
-                    log.debug("Removing %s", oldest_checkpoint)
-                os.remove(oldest_checkpoint)
-
-        return True
-
-    def save(self) -> bool:
-        return self._save_impl("checkpoint", "", self.cfg.keep_checkpoints)
-
-    def save_milestone(self):
-        checkpoint = self._get_checkpoint_dict()
-        assert checkpoint is not None
-        checkpoint_dir = self.checkpoint_dir(self.cfg, self.policy_id)
-        checkpoint_name = f"checkpoint_{self.train_step:09d}_{self.env_steps}.pth"
-
-        milestones_dir = ensure_dir_exists(join(checkpoint_dir, "milestones"))
-        milestone_path = join(milestones_dir, f"{checkpoint_name}")
-        log.info("Saving a milestone %s", milestone_path)
-        torch.save(checkpoint, milestone_path)
-
-    def save_best(self, policy_id, metric, metric_value) -> bool:
-        if policy_id != self.policy_id:
-            return False
-        p = 3  # precision, number of significant digits
-        if metric_value - self.best_performance > 1 / 10**p:
-            log.info(f"Saving new best policy, {metric}={metric_value:.{p}f}!")
-            self.best_performance = metric_value
-            name_suffix = f"_{metric}_{metric_value:.{p}f}"
-            return self._save_impl("best", name_suffix, 1, verbose=False)
-
-        return False
-
-    def set_new_cfg(self, new_cfg: Dict) -> None:
-        self.new_cfg = new_cfg
-
-    def set_policy_to_load(self, policy_to_load: PolicyID) -> None:
-        self.policy_to_load = policy_to_load
-
-    def _maybe_update_cfg(self) -> None:
-        if self.new_cfg is not None:
-            for key, value in self.new_cfg.items():
-                if self.cfg[key] != value:
-                    log.debug("Learner %d replacing cfg parameter %r with new value %r", self.policy_id, key, value)
-                    self.cfg[key] = value
-
-            if self.cfg.lr_schedule == "constant" and self.curr_lr != self.cfg.learning_rate:
-                # PBT-optimized learning rate, only makes sense if we use constant LR
-                # in case of more advanced LR scheduling we should update the parameters of the scheduler, not the
-                # learning rate directly
-                log.debug(f"Updating learning rate from {self.curr_lr} to {self.cfg.learning_rate}")
-                self.curr_lr = self.cfg.learning_rate
-                self._apply_lr(self.curr_lr)
-
-            for param_group in self.optimizer.param_groups:
-                param_group["betas"] = (self.cfg.adam_beta1, self.cfg.adam_beta2)
-                log.debug("Optimizer lr value %.7f, betas: %r", param_group["lr"], param_group["betas"])
-
-            self.new_cfg = None
-
-    def _maybe_load_policy(self) -> None:
-        if self.policy_to_load is not None:
-            with self.param_server.policy_lock:
-                # don't re-load progress if we are loading from another policy checkpoint
-                self.load_from_checkpoint(self.policy_to_load, load_progress=False)
-
-            # make sure everything (such as policy weights) is committed to shared device memory
-            synchronize(self.cfg, self.device)
-            # this will force policy update on the inference worker (policy worker)
-            # we add max_policy_lag steps so that all experience currently in batches is invalidated
-            self.train_step += self.cfg.max_policy_lag + 1
-            self.policy_versions_tensor[self.policy_id] = self.train_step
-
-            self.policy_to_load = None
-
-    @staticmethod
-    def _policy_loss(ratio, adv, clip_ratio_low, clip_ratio_high, valids, num_invalids: int):
-        clipped_ratio = torch.clamp(ratio, clip_ratio_low, clip_ratio_high)
-        loss_unclipped = ratio * adv
-        loss_clipped = clipped_ratio * adv
-        loss = torch.min(loss_unclipped, loss_clipped)
-        loss = masked_select(loss, valids, num_invalids)
-        loss = -loss.mean()
-
-        return loss
 
     def _value_loss(
         self,
@@ -412,45 +252,6 @@ class RetinalLearner(Learner):
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = lr
 
-    def _get_minibatches(self, batch_size, experience_size):
-        """Generating minibatches for training."""
-        assert self.cfg.rollout % self.cfg.recurrence == 0
-        assert experience_size % batch_size == 0, f"experience size: {experience_size}, batch size: {batch_size}"
-        minibatches_per_epoch = self.cfg.num_batches_per_epoch
-
-        if minibatches_per_epoch == 1:
-            return [None]  # single minibatch is actually the entire buffer, we don't need indices
-
-        if self.cfg.shuffle_minibatches:
-            # indices that will start the mini-trajectories from the same episode (for bptt)
-            indices = np.arange(0, experience_size, self.cfg.recurrence)
-            indices = np.random.permutation(indices)
-
-            # complete indices of mini trajectories, e.g. with recurrence==4: [4, 16] -> [4, 5, 6, 7, 16, 17, 18, 19]
-            indices = [np.arange(i, i + self.cfg.recurrence) for i in indices]
-            indices = np.concatenate(indices)
-
-            assert len(indices) == experience_size
-
-            num_minibatches = experience_size // batch_size
-            minibatches = np.split(indices, num_minibatches)
-        else:
-            minibatches = list(slice(i * batch_size, (i + 1) * batch_size) for i in range(0, minibatches_per_epoch))
-
-            # this makes sense but I'd like to do some testing before enabling it
-            # random.shuffle(minibatches)  # same minibatches between epochs, but in random order
-
-        return minibatches
-
-    @staticmethod
-    def _get_minibatch(buffer, indices):
-        if indices is None:
-            # handle the case of a single batch, where the entire buffer is a minibatch
-            return buffer
-
-        mb = buffer[indices]
-        return mb
-
     def _calculate_losses(
         self, mb: AttrDict, num_invalids: int
     ) -> Tuple[ActionDistribution, Tensor, Tensor | float, Optional[Tensor], Tensor | float, Tensor, Dict]:
@@ -497,9 +298,8 @@ class RetinalLearner(Learner):
                 core_outputs = build_core_out_from_seq(core_output_seq, inverted_select_inds)
                 del core_output_seq
             else:
-                core_outputs, _ = self.actor_critic.forward_core(
-                    head_outputs, rnn_states
-                )  # TODO: Check actor_critic usage
+                core_outputs, _ = self.actor_critic.forward_core(head_outputs, rnn_states)
+                # TODO: Check actor_critic usage
 
             del head_outputs
 
@@ -508,9 +308,8 @@ class RetinalLearner(Learner):
 
         with self.timing.add_time("tail"):
             # calculate policy tail outside of recurrent loop
-            result = self.actor_critic.forward_tail(
-                core_outputs, values_only=False, sample_actions=False
-            )  # TODO: Check actor_critic usage
+            result = self.actor_critic.forward_tail(core_outputs, values_only=False, sample_actions=False)
+            # TODO: Check actor_critic usage
             action_distribution = self.actor_critic.action_distribution()  # TODO: Check actor_critic usage
             log_prob_actions = action_distribution.log_prob(mb.actions)
             ratio = torch.exp(log_prob_actions - mb.log_prob_actions)  # pi / pi_old
@@ -892,9 +691,8 @@ class RetinalLearner(Learner):
 
             # calculate estimated value for the next step (T+1)
             normalized_last_obs = buff["normalized_obs"][:, -1]
-            next_values = self.actor_critic(normalized_last_obs, buff["rnn_states"][:, -1], values_only=True)[
-                "values"
-            ]  # TODO: Check actor_critic usage
+            next_values = self.actor_critic(normalized_last_obs, buff["rnn_states"][:, -1], values_only=True)["values"]
+            # TODO: Check actor_critic usage
             buff["values"][:, -1] = next_values
 
             if self.cfg.normalize_returns:
@@ -903,9 +701,8 @@ class RetinalLearner(Learner):
                 # rl_games PPO uses a similar approach, see:
                 # https://github.com/Denys88/rl_games/blob/7b5f9500ee65ae0832a7d8613b019c333ecd932c/rl_games/algos_torch/models.py#L51
                 denormalized_values = buff["values"].clone()  # need to clone since normalizer is in-place
-                self.actor_critic.returns_normalizer(
-                    denormalized_values, denormalize=True
-                )  # TODO: Check actor_critic usage
+                self.actor_critic.returns_normalizer(denormalized_values, denormalize=True)
+                # TODO: Check actor_critic usage
             else:
                 # values are not normalized in this case, so we can use them as is
                 denormalized_values = buff["values"]
