@@ -11,6 +11,7 @@ from signal_slot.signal_slot import EventLoop, EventLoopObject, EventLoopStatus,
 from torch import Tensor
 
 from sample_factory.algo.learning.learner import Learner
+from sample_factory.algo.learning.learner_factory import LearnerFactory
 from sample_factory.algo.runners.runner import MsgHandler, PolicyMsgHandler
 from sample_factory.algo.sampling.sampler import AbstractSampler, ParallelSampler, SerialSampler
 from sample_factory.algo.sampling.stats import samples_stats_handler, stats_msg_handler, timing_msg_handler
@@ -265,7 +266,7 @@ class EvalSamplingAPI:
             self.param_servers[policy_id] = ParameterServer(
                 policy_id, self.policy_versions_tensor, self.cfg.serial_mode
             )
-            self.learners[policy_id] = Learner(
+            self.learners[policy_id] = LearnerFactory().make_learner_func(
                 self.cfg, self.env_info, self.policy_versions_tensor, policy_id, self.param_servers[policy_id]
             )
             # TODO: separate model loading from the learners
