@@ -12,6 +12,12 @@ import torch
 from torch import Tensor
 from torch.nn import Module
 
+from sample_factory.algo.learning.learner import (
+    Learner,
+    LearningRateScheduler,
+    get_lr_scheduler,
+    model_initialization_data,
+)
 from sample_factory.algo.learning.rnn_utils import build_core_out_from_seq, build_rnn_inputs
 from sample_factory.algo.utils.action_distributions import get_action_distribution, is_continuous_action_space
 from sample_factory.algo.utils.env_info import EnvInfo
@@ -32,97 +38,7 @@ from sample_factory.utils.typing import ActionDistribution, Config, InitModelDat
 from sample_factory.utils.utils import ensure_dir_exists, experiment_dir, log
 
 
-class LearningRateScheduler:
-    def update(self, current_lr, recent_kls):
-        return current_lr
-
-    def invoke_after_each_minibatch(self):
-        return False
-
-    def invoke_after_each_epoch(self):
-        return False
-
-
-class KlAdaptiveScheduler(LearningRateScheduler, ABC):
-    def __init__(self, cfg: Config):
-        self.lr_schedule_kl_threshold = cfg.lr_schedule_kl_threshold
-        self.min_lr = cfg.lr_adaptive_min
-        self.max_lr = cfg.lr_adaptive_max
-
-    @abstractmethod
-    def num_recent_kls_to_use(self) -> int:
-        pass
-
-    def update(self, current_lr, recent_kls):
-        num_kls_to_use = self.num_recent_kls_to_use()
-        kls = recent_kls[-num_kls_to_use:]
-        mean_kl = np.mean(kls)
-        lr = current_lr
-        if mean_kl > 2.0 * self.lr_schedule_kl_threshold:
-            lr = max(current_lr / 1.5, self.min_lr)
-        if mean_kl < (0.5 * self.lr_schedule_kl_threshold):
-            lr = min(current_lr * 1.5, self.max_lr)
-        return lr
-
-
-class KlAdaptiveSchedulerPerMinibatch(KlAdaptiveScheduler):
-    def num_recent_kls_to_use(self) -> int:
-        return 1
-
-    def invoke_after_each_minibatch(self):
-        return True
-
-
-class KlAdaptiveSchedulerPerEpoch(KlAdaptiveScheduler):
-    def __init__(self, cfg):
-        super().__init__(cfg)
-        self.num_minibatches_per_epoch = cfg.num_batches_per_epoch
-
-    def num_recent_kls_to_use(self) -> int:
-        return self.num_minibatches_per_epoch
-
-    def invoke_after_each_epoch(self):
-        return True
-
-
-class LinearDecayScheduler(LearningRateScheduler):
-    def __init__(self, cfg):
-        num_updates = cfg.train_for_env_steps // cfg.batch_size * cfg.num_epochs
-        self.linear_decay = LinearDecay([(0, cfg.learning_rate), (num_updates, 0)])
-        self.step = 0
-
-    def invoke_after_each_minibatch(self):
-        return True
-
-    def update(self, current_lr, recent_kls):
-        self.step += 1
-        lr = self.linear_decay.at(self.step)
-        return lr
-
-
-def get_lr_scheduler(cfg) -> LearningRateScheduler:
-    if cfg.lr_schedule == "constant":
-        return LearningRateScheduler()
-    elif cfg.lr_schedule == "kl_adaptive_minibatch":
-        return KlAdaptiveSchedulerPerMinibatch(cfg)
-    elif cfg.lr_schedule == "kl_adaptive_epoch":
-        return KlAdaptiveSchedulerPerEpoch(cfg)
-    elif cfg.lr_schedule == "linear_decay":
-        return LinearDecayScheduler(cfg)
-    else:
-        raise RuntimeError(f"Unknown scheduler {cfg.lr_schedule}")
-
-
-def model_initialization_data(
-    cfg: Config, policy_id: PolicyID, actor_critic: Module, policy_version: int, device: torch.device
-) -> InitModelData:
-    # in serial mode we will just use the same actor_critic directly
-    state_dict = None if cfg.serial_mode else actor_critic.state_dict()
-    model_state = (policy_id, state_dict, device, policy_version)
-    return model_state
-
-
-class Learner(Configurable):
+class RetinalLearner(Learner):
     def __init__(
         self,
         cfg: Config,
@@ -143,6 +59,8 @@ class Learner(Configurable):
         self.actor_critic: Optional[ActorCritic] = None
 
         self.optimizer = None
+
+        self.objective = None
 
         self.curr_lr: Optional[float] = None
         self.lr_scheduler: Optional[LearningRateScheduler] = None
@@ -209,7 +127,9 @@ class Learner(Configurable):
         log.debug("Initializing actor-critic model on device %s", self.device)
 
         # trainable torch module
-        self.actor_critic = create_actor_critic(self.cfg, self.env_info.obs_space, self.env_info.action_space)
+        self.actor_critic = create_actor_critic(
+            self.cfg, self.env_info.obs_space, self.env_info.action_space
+        )  # TODO: Check actor_critic usage
         log.debug("Created Actor Critic model with architecture:")
         log.debug(self.actor_critic)
         self.actor_critic.model_to_device(self.device)
@@ -225,7 +145,7 @@ class Learner(Configurable):
 
         params = list(self.actor_critic.parameters())
 
-        optimizer_cls = dict(adam=torch.optim.Adam, lamb=Lamb)
+        optimizer_cls = dict(adam=torch.optim.Adam, lamb=Lamb)  # TODO: Support for other optimizers
         if self.cfg.optimizer not in optimizer_cls:
             raise RuntimeError(f"Unknown optimizer {self.cfg.optimizer}")
 
@@ -534,6 +454,7 @@ class Learner(Configurable):
     def _calculate_losses(
         self, mb: AttrDict, num_invalids: int
     ) -> Tuple[ActionDistribution, Tensor, Tensor | float, Optional[Tensor], Tensor | float, Tensor, Dict]:
+        # TODO: Calculate losses here using objective
         with torch.no_grad(), self.timing.add_time("losses_init"):
             recurrence: int = self.cfg.recurrence
 
@@ -547,7 +468,7 @@ class Learner(Configurable):
 
         # calculate policy head outside of recurrent loop
         with self.timing.add_time("forward_head"):
-            head_outputs = self.actor_critic.forward_head(mb.normalized_obs)
+            head_outputs = self.actor_critic.forward_head(mb.normalized_obs)  # TODO: Check actor_critic usage
             minibatch_size: int = head_outputs.size(0)
 
         # initial rnn states
@@ -570,10 +491,15 @@ class Learner(Configurable):
             if self.cfg.use_rnn:
                 with self.timing.add_time("bptt_forward_core"):
                     core_output_seq, _ = self.actor_critic.forward_core(head_output_seq, rnn_states)
+                # TODO: Check actor_critic usage
+                # How to deal with rnns at other layers? Suitable / even desirable?
+                # whole logic around rnn stuff here?
                 core_outputs = build_core_out_from_seq(core_output_seq, inverted_select_inds)
                 del core_output_seq
             else:
-                core_outputs, _ = self.actor_critic.forward_core(head_outputs, rnn_states)
+                core_outputs, _ = self.actor_critic.forward_core(
+                    head_outputs, rnn_states
+                )  # TODO: Check actor_critic usage
 
             del head_outputs
 
@@ -582,8 +508,10 @@ class Learner(Configurable):
 
         with self.timing.add_time("tail"):
             # calculate policy tail outside of recurrent loop
-            result = self.actor_critic.forward_tail(core_outputs, values_only=False, sample_actions=False)
-            action_distribution = self.actor_critic.action_distribution()
+            result = self.actor_critic.forward_tail(
+                core_outputs, values_only=False, sample_actions=False
+            )  # TODO: Check actor_critic usage
+            action_distribution = self.actor_critic.action_distribution()  # TODO: Check actor_critic usage
             log_prob_actions = action_distribution.log_prob(mb.actions)
             ratio = torch.exp(log_prob_actions - mb.log_prob_actions)  # pi / pi_old
 
@@ -648,7 +576,11 @@ class Learner(Configurable):
             policy_loss = self._policy_loss(ratio, adv, clip_ratio_low, clip_ratio_high, valids, num_invalids)
             exploration_loss = self.exploration_loss_func(action_distribution, valids, num_invalids)
             kl_old, kl_loss = self.kl_loss_func(
-                self.actor_critic.action_space, mb.action_logits, action_distribution, valids, num_invalids
+                self.actor_critic.action_space,
+                mb.action_logits,
+                action_distribution,
+                valids,
+                num_invalids,  # TODO: Check actor_critic usage
             )
             old_values = mb["values"]
             value_loss = self._value_loss(values, old_values, targets, clip_value, valids, num_invalids)
@@ -757,7 +689,7 @@ class Learner(Configurable):
                     if kl_old is None:
                         # calculate KL-divergence with the behaviour policy action distribution
                         old_action_distribution = get_action_distribution(
-                            self.actor_critic.action_space,
+                            self.actor_critic.action_space,  # TODO: Check actor_critic usage
                             mb.action_logits,
                         )
                         kl_old = action_distribution.kl_divergence(old_action_distribution)
@@ -792,6 +724,7 @@ class Learner(Configurable):
 
                     with self.param_server.policy_lock:
                         self.optimizer.step()
+                        # TODO: add objective here? How to get through interface?
 
                     num_sgd_steps += 1
 
@@ -846,7 +779,7 @@ class Learner(Configurable):
         stats.lr = self.curr_lr
         stats.actual_lr = train_loop_vars.actual_lr  # potentially scaled because of masked data
 
-        stats.update(self.actor_critic.summaries())
+        stats.update(self.actor_critic.summaries())  # TODO: Check actor_critic usage
 
         stats.valids_fraction = var.mb.valids.float().mean()
         stats.same_policy_fraction = (var.mb.policy_id == self.policy_id).float().mean()
@@ -928,7 +861,7 @@ class Learner(Configurable):
 
         # hold the lock while we alter the state of the normalizer since they can be used in other processes too
         with self.param_server.policy_lock:
-            normalized_obs = prepare_and_normalize_obs(self.actor_critic, obs)
+            normalized_obs = prepare_and_normalize_obs(self.actor_critic, obs)  # TODO: Check actor_critic usage
 
         # restore original shape
         for key, x in normalized_obs.items():
@@ -959,7 +892,9 @@ class Learner(Configurable):
 
             # calculate estimated value for the next step (T+1)
             normalized_last_obs = buff["normalized_obs"][:, -1]
-            next_values = self.actor_critic(normalized_last_obs, buff["rnn_states"][:, -1], values_only=True)["values"]
+            next_values = self.actor_critic(normalized_last_obs, buff["rnn_states"][:, -1], values_only=True)[
+                "values"
+            ]  # TODO: Check actor_critic usage
             buff["values"][:, -1] = next_values
 
             if self.cfg.normalize_returns:
@@ -968,7 +903,9 @@ class Learner(Configurable):
                 # rl_games PPO uses a similar approach, see:
                 # https://github.com/Denys88/rl_games/blob/7b5f9500ee65ae0832a7d8613b019c333ecd932c/rl_games/algos_torch/models.py#L51
                 denormalized_values = buff["values"].clone()  # need to clone since normalizer is in-place
-                self.actor_critic.returns_normalizer(denormalized_values, denormalize=True)
+                self.actor_critic.returns_normalizer(
+                    denormalized_values, denormalize=True
+                )  # TODO: Check actor_critic usage
             else:
                 # values are not normalized in this case, so we can use them as is
                 denormalized_values = buff["values"]
@@ -1012,7 +949,7 @@ class Learner(Configurable):
 
             # return normalization parameters are only used on the learner, no need to lock the mutex
             if self.cfg.normalize_returns:
-                self.actor_critic.returns_normalizer(buff["returns"])  # in-place
+                self.actor_critic.returns_normalizer(buff["returns"])  # in-place # TODO: Check actor_critic usage
 
             num_invalids = dataset_size - buff["valids"].sum().item()
             if num_invalids > 0:

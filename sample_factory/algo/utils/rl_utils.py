@@ -35,7 +35,7 @@ def num_agents_per_worker(cfg: Config, env_info: EnvInfo) -> int:
 
 def prepare_and_normalize_obs(model: Module, obs: TensorDict | Dict[str, Tensor]) -> TensorDict | Dict[str, Tensor]:
     for key, x in obs.items():
-        obs[key] = ensure_torch_tensor(x).to(model.device_for_input_tensor(key))
+        obs[key] = ensure_torch_tensor(x).to(model.device_for_input_tensor(key))  # TODO: Check actor_critic usage
     normalized_obs = model.normalize_obs(obs)
     for key, x in normalized_obs.items():
         normalized_obs[key] = x.type(model.type_for_input_tensor(key))
