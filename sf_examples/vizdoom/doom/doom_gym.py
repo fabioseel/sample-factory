@@ -17,6 +17,19 @@ from vizdoom.vizdoom import AutomapMode, DoomGame, Mode, ScreenResolution
 from sample_factory.algo.utils.spaces.discretized import Discretized
 from sample_factory.utils.utils import log, project_tmp_dir
 
+class LogFileLock(FileLock):
+    """
+    Custom file lock that logs the lock acquisition and release.
+    """
+    def acquire(self, **kwargs):
+        log.debug("Acquiring lock %s", self.lock_file)
+        super().acquire(**kwargs)
+        log.debug("Lock %s acquired", self.lock_file)
+
+    def release(self, **kwargs):
+        log.debug("Releasing lock %s", self.lock_file)
+        super().release(**kwargs)
+        log.debug("Lock %s released", self.lock_file)
 
 def doom_lock_file(max_parallel):
     """
@@ -217,7 +230,7 @@ class VizdoomEnv(gym.Env):
         lock_file = lock = None
         if with_locking:
             lock_file = doom_lock_file(max_parallel)
-            lock = FileLock(lock_file)
+            lock = LogFileLock(lock_file)
 
         init_attempt = 0
         while True:
