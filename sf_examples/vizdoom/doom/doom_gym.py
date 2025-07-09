@@ -17,10 +17,12 @@ from vizdoom.vizdoom import AutomapMode, DoomGame, Mode, ScreenResolution
 from sample_factory.algo.utils.spaces.discretized import Discretized
 from sample_factory.utils.utils import log, project_tmp_dir
 
+
 class LogFileLock(FileLock):
     """
     Custom file lock that logs the lock acquisition and release.
     """
+
     def acquire(self, **kwargs):
         log.debug("Acquiring lock %s", self.lock_file)
         super().acquire(**kwargs)
@@ -30,6 +32,7 @@ class LogFileLock(FileLock):
         log.debug("Releasing lock %s", self.lock_file)
         super().release(**kwargs)
         log.debug("Lock %s released", self.lock_file)
+
 
 def doom_lock_file(max_parallel):
     """
@@ -103,6 +106,7 @@ class VizdoomEnv(gym.Env):
         async_mode=False,
         record_to=None,
         render_mode: Optional[str] = None,
+        paralell_start: int = 20,
     ):
         self.initialized = False
 
@@ -113,6 +117,7 @@ class VizdoomEnv(gym.Env):
         self.rng = None
         self.skip_frames = skip_frames
         self.async_mode = async_mode
+        self.parallel_start = paralell_start
 
         # optional - for topdown view rendering and visitation heatmaps
         self.show_automap = show_automap
@@ -230,7 +235,7 @@ class VizdoomEnv(gym.Env):
         lock_file = lock = None
         if with_locking:
             lock_file = doom_lock_file(max_parallel)
-            lock = LogFileLock(lock_file)
+            lock = FileLock(lock_file)
 
         init_attempt = 0
         while True:
@@ -251,7 +256,10 @@ class VizdoomEnv(gym.Env):
                         init_attempt,
                     )
             except Exception as exc:
-                log.warning("VizDoom game.init() threw an exception %r. Terminate process...", exc)
+                log.warning(
+                    "VizDoom game.init() threw an exception %r. Terminate process...",
+                    exc,
+                )
                 from sample_factory.envs.env_utils import EnvCriticalError
 
                 raise EnvCriticalError()
@@ -279,7 +287,7 @@ class VizdoomEnv(gym.Env):
             self.game.add_game_args("+am_thingcolor_item 00ff00")
             # self.game.add_game_args("+am_thingcolor_citem 00ff00")
 
-        self._game_init()
+        self._game_init(max_parallel=self.parallel_start)
         self.initialized = True
 
     def _ensure_initialized(self):
@@ -704,7 +712,11 @@ class VizdoomEnv(gym.Env):
             doom.game.advance_action()
             r = doom.game.get_last_reward()
             episode_reward += r
-            log.info("Episode reward: %.3f, time so far: %.1f s", episode_reward, time.time() - start)
+            log.info(
+                "Episode reward: %.3f, time so far: %.1f s",
+                episode_reward,
+                time.time() - start,
+            )
 
         log.info("Finishing replay")
         doom.close()

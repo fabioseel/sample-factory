@@ -240,6 +240,7 @@ def make_doom_env_impl(
 
     fps = cfg.fps if "fps" in cfg else None
     async_mode = fps == 0
+    parallel_start = cfg.parallel_start if "parallel_start" in cfg else 20
 
     if player_id is None:
         env = VizdoomEnv(
@@ -248,6 +249,7 @@ def make_doom_env_impl(
             skip_frames=skip_frames,
             async_mode=async_mode,
             render_mode=render_mode,
+            paralell_start=parallel_start,
         )
     else:
         timelimit = cfg.timelimit if cfg.timelimit is not None else doom_spec.timelimit
