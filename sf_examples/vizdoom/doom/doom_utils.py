@@ -241,6 +241,7 @@ def make_doom_env_impl(
     fps = cfg.fps if "fps" in cfg else None
     async_mode = fps == 0
     parallel_start = cfg.parallel_start if "parallel_start" in cfg else 20
+    with_locking = cfg.with_locking if "with_locking" in cfg else True
 
     if player_id is None:
         env = VizdoomEnv(
@@ -249,6 +250,7 @@ def make_doom_env_impl(
             skip_frames=skip_frames,
             async_mode=async_mode,
             render_mode=render_mode,
+            with_locking=with_locking,
             paralell_start=parallel_start,
         )
     else:

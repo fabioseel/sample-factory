@@ -106,6 +106,7 @@ class VizdoomEnv(gym.Env):
         async_mode=False,
         record_to=None,
         render_mode: Optional[str] = None,
+        with_locking: bool = True,
         paralell_start: int = 20,
     ):
         self.initialized = False
@@ -118,6 +119,7 @@ class VizdoomEnv(gym.Env):
         self.skip_frames = skip_frames
         self.async_mode = async_mode
         self.parallel_start = paralell_start
+        self.with_locking = with_locking
 
         # optional - for topdown view rendering and visitation heatmaps
         self.show_automap = show_automap
@@ -287,7 +289,7 @@ class VizdoomEnv(gym.Env):
             self.game.add_game_args("+am_thingcolor_item 00ff00")
             # self.game.add_game_args("+am_thingcolor_citem 00ff00")
 
-        self._game_init(max_parallel=self.parallel_start)
+        self._game_init(with_locking=self.with_locking, max_parallel=self.parallel_start)
         self.initialized = True
 
     def _ensure_initialized(self):
