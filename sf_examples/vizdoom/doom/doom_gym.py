@@ -15,6 +15,7 @@ from gymnasium.utils import seeding
 from vizdoom.vizdoom import AutomapMode, DoomGame, Mode, ScreenResolution
 
 from sample_factory.algo.utils.spaces.discretized import Discretized
+from sample_factory.envs.env_utils import EnvCriticalError
 from sample_factory.utils.utils import log, project_tmp_dir
 
 
@@ -233,7 +234,7 @@ class VizdoomEnv(gym.Env):
 
         self._set_game_mode(mode)
 
-    def _game_init(self, with_locking=True, max_parallel=10):
+    def _game_init(self, with_locking=True, max_parallel=10, max_attempts=10):
         lock_file = lock = None
 
         init_attempt = 0
@@ -257,13 +258,14 @@ class VizdoomEnv(gym.Env):
                         lock_file,
                         init_attempt,
                     )
+                if max_attempts is not None and init_attempt > max_attempts:
+                    log.warning("Max init attempts reached, giving up...")
+                    raise EnvCriticalError()
             except Exception as exc:
                 log.warning(
                     "VizDoom game.init() threw an exception %r. Terminate process...",
                     exc,
                 )
-                from sample_factory.envs.env_utils import EnvCriticalError
-
                 raise EnvCriticalError()
 
     def initialize(self):
