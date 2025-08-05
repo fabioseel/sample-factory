@@ -235,12 +235,12 @@ class VizdoomEnv(gym.Env):
 
     def _game_init(self, with_locking=True, max_parallel=10):
         lock_file = lock = None
-        if with_locking:
-            lock_file = doom_lock_file(max_parallel)
-            lock = FileLock(lock_file)
 
         init_attempt = 0
         while True:
+            if with_locking:
+                lock_file = doom_lock_file(max_parallel)
+                lock = FileLock(lock_file)
             init_attempt += 1
             try:
                 if with_locking:
